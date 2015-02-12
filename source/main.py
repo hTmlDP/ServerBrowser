@@ -1,4 +1,3 @@
-#LICENSED ON GPL v3
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
 from kivy.app import App
