@@ -1,4 +1,4 @@
-#LICENSED ON GPL v3
+# LICENSED ON GPL v3
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
 from kivy.app import App
@@ -22,7 +22,7 @@ from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
 from socket import socket, AF_INET, SOCK_DGRAM
 from kivy.uix.image import AsyncImage
-from urllib2 import urlopen
+from urllib2 import urlopen, quote
 from kivy.utils import platform
 from kivy.core.window import Window
 Builder.load_string("""
@@ -168,7 +168,21 @@ Builder.load_string("""
       Rectangle:
          pos: self.pos
          size: self.size
+
+<PlDesc>
+   background_color: 1, 1, 1, 1
+   size_hint_y: 1
+   size_hint_x: 1
+   canvas.before:
+      Color:
+         rgba: self.background_color
+      Rectangle:
+         pos: self.pos
+         size: self.size
 """)
+class PlDesc(Label):
+   pass
+
 class NetworkError(Label):
    pass
 
@@ -247,7 +261,15 @@ class ServerBrowser(App):
       self.server_list = Screen(name='server_list')
       self.slist_scroll = ScrollView()
       #create the player info screen
-      self.player_info = Screen(name='player_info')
+      self.player_info=Screen(name='player_info')
+      self.player_description=PlDesc(markup=True, 
+                                     size=(Window.size[0], Window.size[1]),
+                                     text_size=(Window.size[0]*0.8, Window.size[1]*0.8),
+                                     text='', 
+                                     halign='left', 
+                                     strip=True,
+                                     valign='middle')
+      self.player_info.add_widget(self.player_description)
       #add the screens to the screen manager
       self.sm.add_widget(self.loading_screen)
       self.sm.add_widget(self.server_info)
@@ -285,6 +307,9 @@ class ServerBrowser(App):
          #print 'esc'
          if self.sm.current == 'server_list':
             return
+         if self.sm.current=='player_info':
+            self.sm.current='server_info'
+            return True
          return True
       return False
 
@@ -298,6 +323,28 @@ class ServerBrowser(App):
          android.map_key(android.KEYCODE_BACK, 1001)
       win = Window
       win.bind(on_keyboard=self.my_key_handler)
+
+   #-----------------------------------------------
+   # load_player
+   #-----------------------------------------------
+   def load_player(self, name, args=None):
+      self.sm.current='player_info'
+      info = GetPlayerInfo(name)
+      if not info:
+         self.player_description.halign='center'
+         self.player_description.text="[size=30][color=#000000]No profile for %s[/color][/size]" % name
+         return
+      else:
+         self.player_description.halign='left'
+      string = '[size=30][color=#000000]Profile for %s[/color][/size]\n' % name
+      tab = [ 'DPLogin ID:',
+            'Names Registered:',
+            'Active Clan:',
+            'Former Clans:'
+         ]
+      for i in range(len(tab)):
+         string=string+'[color=#000000][b]%s [/b][/color][color=#555555]%s[/color]\n\n' % (tab[i], info[i])
+      self.player_description.text=string
 
    #-----------------------------------------------
    # thread_load_server
@@ -513,7 +560,9 @@ class ServerBrowser(App):
                            text='[color=#000000]%s[/color]' % i['ping'])
 
             wgt.add_widget(pn); wgt.add_widget(scr); wgt.add_widget(png)
-
+         pn.bind(on_press=partial(self.load_player, i['name']))
+         scr.bind(on_press=partial(self.load_player, i['name']))
+         png.bind(on_press=partial(self.load_player, i['name']))
          self.playerlist_layout.add_widget(wgt) #adding a row to the playerlist table
       size=((Window.size[1]*0.5)-50*serverinfo['clients']+0.5) #Grey box's size (playerlist)
       if size<0:
@@ -532,6 +581,9 @@ class ServerBrowser(App):
       self.screen_height=Window.size[0]
       if self.serverinfo:
          self.spacer.height=((Window.size[1]*0.5)-50*self.serverinfo['clients']+0.5)
+      if self.sm.current=='player_info':
+         self.player_description.size=(Window.size[0], Window.size[1])
+         self.player_description.text_size=(Window.size[0]*0.8, Window.size[1]*0.8)
 
    #-----------------------------------------------
    # on_ne
@@ -818,7 +870,9 @@ def CleanSpecialChars(text): #Removes the garbage from player's nick (colors, sy
 # GetPlayerInfo
 #-----------------------------------------------
 def GetPlayerInfo(nameorid):
+   res=None
    nicks = []
+   nameorid=quote(nameorid) #Replace chars like #, <, > with %xx
    response = urlopen('http://dplogin.com/index.php?action=displaymembers&search={name}'.format(name=nameorid)).read()
    matches = re.findall('\\<a\\ href\\=\\"\\/index\\.php\\?action\\=viewmember\\&playerid\\=(\d+)\\"\\>.*?\\<\\/a\\>', response)
    full_list = []
@@ -836,6 +890,8 @@ def GetPlayerInfo(nameorid):
             names = full_list[0][1]
             dp_id = full_list[0][0]
             res = response_list[0]
+   if not res:
+      return None
    clan=re.findall('\\Active\\ (?:Clans)|(?:Clan)\\:\\<\\/b\\>\\<\\/td\\>\\<td\\>.*?\\<\\/td\\>\\<\\/tr\\>', res)
    for i in clan: #len(clan) is 0 or 1 propably
       clan=re.findall('\\<a\\ href\\=\\"\\/index.php\\?action\\=viewclan\\&clanid\\=\d+\\"\\>(.*?)\\<\\/a\\>', i)
@@ -873,4 +929,3 @@ def Status(host): #a simple status function
 if __name__ == '__main__':
    server_browser=ServerBrowser()
    server_browser.run()
-    
