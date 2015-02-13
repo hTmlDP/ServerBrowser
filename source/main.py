@@ -180,6 +180,11 @@ Builder.load_string("""
          pos: self.pos
          size: self.size
 """)
+class Check(): 
+   def __init__(self):
+      self.response=None
+      self.size=None
+
 class PlDesc(Label):
    pass
 
@@ -232,6 +237,7 @@ class ServerBrowser(App):
    def build(self):
       self.loaded_servers_id = 0
       self.serverinfo = None
+      self.loading_serverlist=False
       self.screen_height = Window.size[0]
       Window.bind(size = self.update_height)
       App.use_kivy_settings = False
@@ -306,7 +312,8 @@ class ServerBrowser(App):
             return True
          #print 'esc'
          if self.sm.current == 'server_list':
-            return
+            self.stop()
+            return True
          if self.sm.current=='player_info':
             self.sm.current='server_info'
             return True
@@ -328,22 +335,28 @@ class ServerBrowser(App):
    # load_player
    #-----------------------------------------------
    def load_player(self, name, args=None):
-      self.sm.current='player_info'
       info = GetPlayerInfo(name)
+      if info=='canceled':
+         return
+      self.sm.current='player_info'
       if not info:
          self.player_description.halign='center'
-         self.player_description.text="[size=30][color=#000000]No profile for %s[/color][/size]" % name
+         if info!=False:
+            self.player_description.text="[size=30][color=#000000]No profile for %s[/color][/size]" % name
+         else:
+            self.player_description.text="[size=30][color=#000000]Couldn't connect to DPLogin.com[/color][/size]"
          return
       else:
          self.player_description.halign='left'
-      string = '[size=30][color=#000000]Profile for %s[/color][/size]\n' % name
+      string = '[size=30][color=#000000][b]Profile for %s[/b][/color][/size]\n\n' % name
       tab = [ 'DPLogin ID:',
             'Names Registered:',
             'Active Clan:',
             'Former Clans:'
          ]
       for i in range(len(tab)):
-         string=string+'[color=#000000][b]%s [/b][/color][color=#555555]%s[/color]\n\n' % (tab[i], info[i])
+         if info[i]!='':
+            string=string+'[color=#000000][b]%s [/b][/color][color=#555555]%s[/color]\n' % (tab[i], info[i])
       self.player_description.text=string
 
    #-----------------------------------------------
@@ -446,7 +459,6 @@ class ServerBrowser(App):
       for i in serverinfo['players']: #Yeah, this might be shorter, but it's not really important since it isn't that heavy ;) You can do it for me if you want ;D
          j+=1
          wgt=None
-         #print i
          if str(j) in pr: #LABEL FOR THE RED TEAM
             wgt=GridLayout(size_hint_y=None,
                            height=50,
@@ -560,9 +572,9 @@ class ServerBrowser(App):
                            text='[color=#000000]%s[/color]' % i['ping'])
 
             wgt.add_widget(pn); wgt.add_widget(scr); wgt.add_widget(png)
-         pn.bind(on_press=partial(self.load_player, i['name']))
-         scr.bind(on_press=partial(self.load_player, i['name']))
-         png.bind(on_press=partial(self.load_player, i['name']))
+         pn.bind(on_press=partial(self.thread_load_player, i['name']))
+         scr.bind(on_press=partial(self.thread_load_player, i['name']))
+         png.bind(on_press=partial(self.thread_load_player, i['name']))
          self.playerlist_layout.add_widget(wgt) #adding a row to the playerlist table
       size=((Window.size[1]*0.5)-50*serverinfo['clients']+0.5) #Grey box's size (playerlist)
       if size<0:
@@ -570,20 +582,74 @@ class ServerBrowser(App):
       self.serverinfo=serverinfo
       self.spacer=Black(size_hint_y=None, height=size) #Creating the grey box
       self.playerlist_layout.add_widget(self.spacer) #adding it
+   #-----------------------------------------------
+   #thread_load_player
+   #-----------------------------------------------
+   def thread_load_player(self, name, arg=None):
+      Thread(target=self.load_player, args=(name,)).start()
+   #-----------------------------------------------
+   # load_webpage
+   #-----------------------------------------------
+   def load_webpage(self, url, desc=None):
+      if desc==None:
+         desc='Downloading %s' % url
+      self.loading_label.text=desc
+      self.ls_terminate=False
+      self.progress_bar.value=0
+      self.hostname.text = "[0%]"
+      chk=Check()
+      Thread(target=self.threaded_urlopen, args=(chk, url)).start() #Thread loading headers
+      t1 = time()
+      while (chk.size==None) and time()-t1<2: #Wait for the HTTP response.
+         if self.ls_terminate:
+            return 'canceled'
+         pass
+      if not chk.response or chk.size==False: #If there's no response after more than 2 seconds
+         return False
+      myfile=''
+      bytes_loaded = 0
+      try:
+         while not self.ls_terminate: #no loading when self.total_size is not known.
+            chunk = chk.response.read(10)
+            if not chunk: break #break the loop when the file has been just loaded.
+            myfile=myfile+chunk
+            percent = (bytes_loaded*100)/(chk.size)
+            self.progress_bar.value=percent
+            self.hostname.text = "[%s%%]"%percent
+            bytes_loaded += len(chunk)
+         if self.ls_terminate:
+            return 'canceled'
+      except:
+         return False
+      self.ls_terminate=True
+      return myfile
+
+   #-----------------------------------------------
+   #threaded_urlopen
+   #-----------------------------------------------
+   def threaded_urlopen(self, chk, url):
+      try:
+         chk.response = urlopen(url)
+         chk.size = chk.response.info().getheader('Content-Length').strip()
+         chk.size = int(chk.size)
+      except:
+         chk.size = False
 
    #-----------------------------------------------
    # update_height
    #-----------------------------------------------
    def update_height(self, a=None, b=None): #Update some widgets on screen resize.
-      if self.ne:
-         self.ne.size=(Window.size[0], Window.size[1]+0.5)
-         self.ne.text_size=self.ne.size
-      self.screen_height=Window.size[0]
-      if self.serverinfo:
-         self.spacer.height=((Window.size[1]*0.5)-50*self.serverinfo['clients']+0.5)
-      if self.sm.current=='player_info':
+      try:
+         if self.ne:
+            self.ne.size=(Window.size[0], Window.size[1]+0.5)
+            self.ne.text_size=self.ne.size
+         self.screen_height=Window.size[0]
+         if self.serverinfo:
+            self.spacer.height=((Window.size[1]*0.5)-50*self.serverinfo['clients']+0.5)
          self.player_description.size=(Window.size[0], Window.size[1])
          self.player_description.text_size=(Window.size[0]*0.8, Window.size[1]*0.8)
+      except:
+         pass
 
    #-----------------------------------------------
    # on_ne
@@ -612,6 +678,7 @@ class ServerBrowser(App):
    # load_serverlist
    #-----------------------------------------------
    def load_serverlist(self, first=True):
+      self.loading_serverlist=True
       self.nerun = 0 #set on_ne as 'haven't been run yet'
       self.sm.current = 'loading_screen' #switch to the loading_screen
       if first: #Do if it's the first run
@@ -656,6 +723,7 @@ class ServerBrowser(App):
             self.on_ne(first)
          self.sm.current = 'server_list'
          self.enable_overscroll = False
+         self.loading_serverlist = False
          return
       self.progress_bar.value = 100
       serverlist = serverlist.split('\r\n')
@@ -674,6 +742,7 @@ class ServerBrowser(App):
             self.serverlist_cache=serverlist_cache_backup
             self.sm.current='server_list'
             self.enable_overscroll=False
+            self.loading_serverlist = False
             return
          progress=(i*100)/l
          self.hostname.text = '%20.20s   [%d%%]' % (address, progress)
@@ -710,6 +779,7 @@ class ServerBrowser(App):
             self.addwidget(self.slist_scroll, self.server_list_layout)
             self.sm.current = 'server_list'
             self.enable_overscroll = False
+            self.loading_serverlist = False
             return
       for address in queue: #Appending to the table
          if not self.serverlist_cache[address]: continue #skip server if the UDP status package has timed out.
@@ -870,15 +940,34 @@ def CleanSpecialChars(text): #Removes the garbage from player's nick (colors, sy
 # GetPlayerInfo
 #-----------------------------------------------
 def GetPlayerInfo(nameorid):
+   server_browser.sm.current='loading_screen'
+   #Check if theres at least one alphanumeric character in the name.
+   cont=False
+   for character in nameorid.lower():
+      if character in 'abcdefghijklmnopqrstuvwxyz1234567890':
+         cont=True; break
+   if not cont:
+      self.sm.current='player_info'
+      return None
+   #--------
    res=None
    nicks = []
    nameorid=quote(nameorid) #Replace chars like #, <, > with %xx
-   response = urlopen('http://dplogin.com/index.php?action=displaymembers&search={name}'.format(name=nameorid)).read()
+   response = server_browser.load_webpage('http://dplogin.com/index.php?action=displaymembers&search={name}'.format(name=nameorid), 'Searching for %s' % nameorid)
+   if not response:
+      server_browser.sm.current='player_info'
+      return False
+   if response=='canceled':
+      server_browser.sm.current='server_info'
+      return 'canceled'
    matches = re.findall('\\<a\\ href\\=\\"\\/index\\.php\\?action\\=viewmember\\&playerid\\=(\d+)\\"\\>.*?\\<\\/a\\>', response)
    full_list = []
    response_list = []
    for i in matches:
-      response = urlopen('http://dplogin.com/index.php?action=viewmember&playerid={id}'.format(id=i)).read()
+      response = server_browser.load_webpage('http://dplogin.com/index.php?action=viewmember&playerid={id}'.format(id=i), 'Downloading the profile of %s' % i)
+      if response=='canceled':
+         server_browser.sm.current='server_info'
+         return 'canceled'
       response_list.append(response)
       names = re.findall('\\<tr\\>\\<td\\>\\<b\\ class\\=\\"faqtitle\\"\\>Names?\\ registered\\:\\<\\/b\\>\\<\\/td\\>\\<td\\>(.*?)\\<\\/td\\>\\<\\/tr\\>', response)[0].split(', ')
       full_list.append([str(i), names])
@@ -891,6 +980,7 @@ def GetPlayerInfo(nameorid):
             dp_id = full_list[0][0]
             res = response_list[0]
    if not res:
+      server_browser.sm.current='player_info'
       return None
    clan=re.findall('\\Active\\ (?:Clans)|(?:Clan)\\:\\<\\/b\\>\\<\\/td\\>\\<td\\>.*?\\<\\/td\\>\\<\\/tr\\>', res)
    for i in clan: #len(clan) is 0 or 1 propably
@@ -899,6 +989,7 @@ def GetPlayerInfo(nameorid):
    old_clan=re.findall('\\<b\\ class\\=\\"faqtitle\\"\\>\\Former\\ Clans?\\:\\<\\/b\\>\\<\\/td\\>\\<td\\>.*?\\<\\/td\\>\\<\\/tr\\>', res, re.DOTALL)
    for i in old_clan: #len(clan) is 0 or 1 propably
       old_clan=re.findall('\\<a\\ href\\=\\"\\/index.php\\?action\\=viewclan\\&clanid\\=\d+\\"\\>(.*?)\\<\\/a\\>', i)
+   server_browser.sm.current='player_info'
    return [dp_id, ', '.join(names), ', '.join(clan), ', '.join(old_clan)]
 
 #-----------------------------------------------
@@ -929,3 +1020,4 @@ def Status(host): #a simple status function
 if __name__ == '__main__':
    server_browser=ServerBrowser()
    server_browser.run()
+   
