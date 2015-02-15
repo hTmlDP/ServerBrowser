@@ -2,12 +2,16 @@
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
 from kivy.app import App
+from webbrowser import open as open_url
 from kivy.core.window import Window
 from kivy.clock import mainthread
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.progressbar import ProgressBar
+from toast import toast
 from threading import Thread
 import re
+from kivy.uix.button import Button
+from kivy.uix.popup import Popup
 from sys import exit
 from time import sleep, time
 from kivy.loader import Loader
@@ -22,9 +26,10 @@ from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
 from socket import socket, AF_INET, SOCK_DGRAM
 from kivy.uix.image import AsyncImage
-from urllib2 import urlopen, quote
+from urllib import urlopen, quote, urlencode
 from kivy.utils import platform
 from kivy.core.window import Window
+__version__="1.1"
 Builder.load_string("""
 <MainLayout>:
    size_hint_y: None
@@ -235,6 +240,30 @@ class ServerBrowser(App):
    # build
    #-----------------------------------------------
    def build(self):
+      self.popup_layout=GridLayout(cols=1,
+                                   rows=2,
+                                   size_hint_x=1,
+                                   size_hint_y=1)
+      self.popup_label=Label(text='New Version: 1.1\nFeatures:\n -new look\n  -hello\n -bug fixes\n\n\nDo you wish to update?',
+                             size_hint_y=1,
+                             halign='center',
+                             size_hint_x=1)
+      self.popup_layout.add_widget(self.popup_label)
+      gl=GridLayout(cols=2,
+                    rows=1,
+                    size_hint_x=1,
+                    size_hint_y=None,
+                    height=70)
+      self.yes=Button(text='Yes')
+      gl.add_widget(self.yes)
+      no=Button(text='No')
+      gl.add_widget(no)
+      self.popup_layout.add_widget(gl)
+      self.popup = Popup(title='A new version is available!',
+                         content=self.popup_layout,
+                         auto_dismiss=False)
+      no.bind(on_press=self.popup.dismiss)
+      self.enable_playerlist_overscroll=False
       self.loaded_servers_id = 0
       self.serverinfo = None
       self.loading_serverlist=False
@@ -281,9 +310,31 @@ class ServerBrowser(App):
       self.sm.add_widget(self.server_info)
       self.sm.add_widget(self.server_list)
       self.sm.add_widget(self.player_info)
-      #load the serverlist on startup
-      Thread(target=self.load_serverlist).start()
       return self.sm
+   #-----------------------------------------------
+   # latest (check for updates)
+   #-----------------------------------------------
+   def tomaster(self):
+      sock = socket(AF_INET, SOCK_DGRAM)
+      sock.connect(("91.239.67.195", 5123))
+      sock.settimeout(1)
+      sock.send('sb')
+      try:
+         response = sock.recv(2048)
+      except:
+         return
+      response=response.split('\t')
+      res={}
+      res['version']=response[0]
+      res['url']=response[1]
+      res['features']=response[2]
+      if __version__!=res['version']:
+         self.yes.bind(on_press=partial(open_url, res['url']))
+         self.popup_label.text='Version: %s\n\nFeatures:\n%s\n\nDo you wish to update?\n' % (res['version'], res['features'])
+         self.popup.open()
+         return
+      return
+
 
    #-----------------------------------------------
    # on_pause
@@ -302,15 +353,12 @@ class ServerBrowser(App):
    #-----------------------------------------------
    def my_key_handler(self, window, keycode1, keycode2, text, modifiers):
       if keycode1 in [27, 1001]:
-         #print 'esc'
-         #print self.sm.current
          if self.sm.current == 'server_info':
             self.sm.current = 'server_list'
             return True
          if self.sm.current == 'loading_screen' and self.ls_terminate == False:
             self.ls_terminate = True
             return True
-         #print 'esc'
          if self.sm.current == 'server_list':
             self.stop()
             return True
@@ -324,6 +372,9 @@ class ServerBrowser(App):
    # post_build_init
    #-----------------------------------------------
    def post_build_init(self, *args):
+      #load the serverlist on startup
+      Thread(target=self.load_serverlist).start()
+      Thread(target=self.tomaster).start()
       #bind the back button
       if platform() == 'android':
          import android
@@ -363,7 +414,15 @@ class ServerBrowser(App):
    # thread_load_server
    #-----------------------------------------------
    def thread_load_server(self, server, b=None):
+      self.c_server=server
       Thread(target=self.load_server, args=(server,)).start()
+
+   #-----------------------------------------------
+   # thread_update_server
+   #-----------------------------------------------
+   def thread_update_server(self, server, b=None):
+      self.c_server=server
+      Thread(target=self.update_server, args=(server,)).start()
 
    #-----------------------------------------------
    # load_server
@@ -386,32 +445,124 @@ class ServerBrowser(App):
 
       self.carousel=Carousel(scroll_timeout=100,
                              size_hint_y=.5)
+      self.cvarlist=BoxLayout(size_hint_x=1, size_hint_y=1)
       self.scroll_view = ScrollView()
+      self.scroll_view.effect_y.bind(overscroll=self.on_playerlist_overscroll)
       self.addwidget(self.scroll_view, self.main_layout)
+      self.addwidget(self.cvarlist, self.scroll_view)
       
       self.mapname_label = MapnameLabel(text=status_response['mapname'],
                                         size_hint_y=.05)
 
-      self.carousel.add_widget(self.scroll_view)
+      self.carousel.add_widget(self.cvarlist)
+      self.playerlist_root_layout = BoxLayout(size_hint_x=1, size_hint_y=1)
       self.playerlist_layout = GridLayout(cols=1, spacing=1, size_hint_y=None)
       self.playerlist_layout.bind(minimum_height=self.playerlist_layout.setter('height'))
       self.coloured_playerlist(status_response)
       self.playerlist = ScrollView(do_scroll_y=True)
+      self.playerlist.effect_y.bind(overscroll=self.on_playerlist_overscroll)
       self.addwidget(self.playerlist, self.playerlist_layout)
-      self.carousel.add_widget(self.playerlist)
-      img=AsyncImage(source='loading_mapshot.png',
+      self.addwidget(self.playerlist_root_layout, self.playerlist)
+      self.carousel.add_widget(self.playerlist_root_layout)
+      self.img=AsyncImage(source='loading_mapshot.png',
                      allow_stretch=True,
                      size_hint_y=.45,
                      nocache=True)
       mpname = status_response['mapname'].split('/')[-1] #get the mapname for loading mapshot
-      src = 'http://htmldp.com/mapshots/mapshots/%s.jpg' % mpname #create the link
+      src = 'http://91.239.67.195/mapshots/mapshots/%s.jpg' % mpname #create the link
       #add the widgets in the main thread
-      self.addwidget(self.page_root, img)
+      self.addwidget(self.page_root, self.img)
       self.addwidget(self.page_root, self.mapname_label)
       self.addwidget(self.page_root, self.carousel)
       self.addwidget(self.server_info, self.page_root)
       self.sm.current = 'server_info'
-      Thread(target=self.load_mapshot, args=(src, img,)).start()
+      Thread(target=self.load_mapshot, args=(src, self.img,)).start()
+   #-----------------------------------------------
+   # update_server
+   #-----------------------------------------------
+   hx=0
+   def update_server(self, server):
+      self.hx+=1
+      #self.sm.current='loading_screen'
+      msg="Server Refreshed"
+      #self.clearwidgets(
+      #)
+      try:
+         status=Status(server)
+      except:
+         status=self.serverlist_cache[server]
+         msg="UDP Timeout"
+      #---
+      if status['mapname']!=self.serverlist_cache[server]['mapname']:
+         self.mapname_label.text=status['mapname']
+         self.img.source='loading_mapshot.png'
+         mpname = status['mapname'].split('/')[-1] #get the mapname for loading mapshot
+         src = 'http://91.239.67.195/mapshots/mapshots/%s.jpg' % mpname #create the link
+         Thread(target=self.load_mapshot, args=(src, self.img,)).start()
+      #---
+      self.refresh_cvarlist(status)
+      self.refresh_playerlist(status)
+      self.enable_playerlist_overscroll = False
+      if msg=="Server Refreshed":
+         self.serverlist_cache[server]=status
+      sleep(0.5); self.tst(msg)
+
+   @mainthread
+   def refresh_playerlist(self, status):
+      self.playerlist.effect_y.unbind(overscroll=self.on_playerlist_overscroll)
+      self.playerlist_layout.unbind(minimum_height=self.playerlist_layout.setter('height'))
+      self.playerlist_root_layout.remove_widget(self.playerlist)
+      del self.playerlist
+      del self.playerlist_layout
+      self.playerlist_layout = GridLayout(cols=1, spacing=1, size_hint_y=None)
+      self.coloured_playerlist(status)
+      self.playerlist = ScrollView(do_scroll_y=True)
+      self.playerlist_layout.bind(minimum_height=self.playerlist_layout.setter('height'))
+      self.playerlist.effect_y.bind(overscroll=self.on_playerlist_overscroll)
+      self.playerlist.add_widget(self.playerlist_layout)
+      self.playerlist_root_layout.add_widget(self.playerlist)
+
+   @mainthread
+   def refresh_cvarlist(self, status):
+      self.scroll_view.effect_y.unbind(overscroll=self.on_playerlist_overscroll)
+      self.main_layout.unbind(minimum_height=self.main_layout.setter('height'))
+      self.cvarlist.remove_widget(self.scroll_view)
+      del self.scroll_view
+      del self.main_layout
+      self.main_layout = MainLayout()
+      status_keys = status.keys() #get keys of the dict
+      status_keys.sort() #sort them
+      for i in status_keys: #adding rows to the cvars table, check add_row to understand it
+         if i == 'players': continue
+         self.add_row(i, status[i], False)
+
+      self.scroll_view = ScrollView()
+      self.main_layout.bind(minimum_height=self.main_layout.setter('height'))
+      self.scroll_view.effect_y.bind(overscroll=self.on_playerlist_overscroll)
+      self.scroll_view.add_widget(self.main_layout)
+      self.cvarlist.add_widget(self.scroll_view)
+
+   @mainthread
+   def tst(self, msg):
+      toast(msg)
+   @mainthread
+   def load_plist(self):
+      self.carousel.load_slide(self.playerlist)
+      self.sm.current='server_info'
+
+   @mainthread
+   def b_ind(self):
+      self.playerlist_layout.bind(minimum_height=self.playerlist_layout.setter('height'))
+      self.playerlist.effect_y.bind(overscroll=self.on_playerlist_overscroll)
+
+   @mainthread
+   def un_bind(self):
+      self.playerlist.effect_y.unbind(overscroll=self.on_playerlist_overscroll)
+      self.playerlist_layout.unbind(minimum_height=self.playerlist_layout.setter('height'))
+      self.playerlist_root_layout.remove_widget(self.playerlist)
+      del self.playerlist
+      del self.playerlist_layout
+      self.playerlist_layout = GridLayout(cols=1, spacing=1, size_hint_y=None)
 
    #-----------------------------------------------
    # load_mapshot
@@ -424,6 +575,8 @@ class ServerBrowser(App):
             if self.loaded_servers_id != loaded_servers_id:
                return #Don't put the picture if the a new server has been loaded.
             string=urlopen(src).read()
+            if string[:9]=="<!DOCTYPE":
+               raise('404')
             if self.loaded_servers_id != loaded_servers_id:
                return #Don't put the picture if the a new server has been loaded.
             mapshot.write(string)
@@ -444,7 +597,12 @@ class ServerBrowser(App):
 
    def coloured_playerlist(self, serverinfo):
       if serverinfo['clients'] == 0:
-         self.playerlist_layout.add_widget(Label(text='Server is empty'))
+         size=((Window.size[1]*0.5)-50*serverinfo['clients']+1) #Grey box's size (playerlist)
+         if size<0:
+            size=0
+         self.serverinfo=serverinfo
+         self.spacer=Black(size_hint_y=None, height=size, text='Server is empty') #Creating the grey box
+         self.playerlist_layout.add_widget(self.spacer) #adding it
          return
       #get information about teams
       pr=[]; pb=[]; py=[]; pp=[]; po=[]
@@ -485,7 +643,7 @@ class ServerBrowser(App):
                            spacing=1)
 
             pn=BlueTeam(text='[color=#FFFFFF]%s[/color]' % i['name'],
-                        size_hint_x=.8)
+                        size_hint_x=1)
 
             scr=BlueTeam(size_hint_x=None,
                          width=70,
@@ -504,7 +662,7 @@ class ServerBrowser(App):
                            spacing=1)
 
             pn=YellowTeam(text='[color=#000000]%s[/color]' % i['name'],
-                          size_hint_x=.8)
+                          size_hint_x=1)
 
             scr=YellowTeam(size_hint_x=None,
                            width=70,
@@ -523,7 +681,7 @@ class ServerBrowser(App):
                            spacing=1)
 
             pn=PurpleTeam(text='[color=#FFFFFF]%s[/color]' % i['name'],
-                          size_hint_x=.8)
+                          size_hint_x=1)
 
             scr=PurpleTeam(size_hint_x=None,
                            width=70,
@@ -542,7 +700,7 @@ class ServerBrowser(App):
                            spacing=1)
 
             pn=Observer(text='[color=#000000]%s[/color]' % i['name'],
-                        size_hint_x=.8)
+                        size_hint_x=1)
 
             scr=Observer(size_hint_x=None,
                         width=70,
@@ -561,7 +719,7 @@ class ServerBrowser(App):
                            spacing=1)
 
             pn=Connecting(text='[color=#000000]%s[/color]' % i['name'],
-                          size_hint_x=.8)
+                          size_hint_x=1)
 
             scr=Connecting(size_hint_x=None,
                            width=70,
@@ -576,7 +734,7 @@ class ServerBrowser(App):
          scr.bind(on_press=partial(self.thread_load_player, i['name']))
          png.bind(on_press=partial(self.thread_load_player, i['name']))
          self.playerlist_layout.add_widget(wgt) #adding a row to the playerlist table
-      size=((Window.size[1]*0.5)-50*serverinfo['clients']+0.5) #Grey box's size (playerlist)
+      size=((Window.size[1]*0.5)-50*serverinfo['clients']+1) #Grey box's size (playerlist)
       if size<0:
          size=0
       self.serverinfo=serverinfo
@@ -586,11 +744,11 @@ class ServerBrowser(App):
    #thread_load_player
    #-----------------------------------------------
    def thread_load_player(self, name, arg=None):
-      Thread(target=self.load_player, args=(name,)).start()
+      Thread(target=self.load_player, args=(name, )).start()
    #-----------------------------------------------
    # load_webpage
    #-----------------------------------------------
-   def load_webpage(self, url, desc=None):
+   def load_webpage(self, url, desc=None, post=None):
       if desc==None:
          desc='Downloading %s' % url
       self.loading_label.text=desc
@@ -598,9 +756,12 @@ class ServerBrowser(App):
       self.progress_bar.value=0
       self.hostname.text = "[0%]"
       chk=Check()
-      Thread(target=self.threaded_urlopen, args=(chk, url)).start() #Thread loading headers
+      Thread(target=self.threaded_urlopen, args=(chk, url, post)).start() #Thread loading headers
       t1 = time()
-      while (chk.size==None) and time()-t1<2: #Wait for the HTTP response.
+      limit=2
+      if post:
+         limit=4
+      while (chk.size==None) and time()-t1<limit: #Wait for the HTTP response.
          if self.ls_terminate:
             return 'canceled'
          pass
@@ -610,7 +771,7 @@ class ServerBrowser(App):
       bytes_loaded = 0
       try:
          while not self.ls_terminate: #no loading when self.total_size is not known.
-            chunk = chk.response.read(10)
+            chunk = chk.response.read(64)
             if not chunk: break #break the loop when the file has been just loaded.
             myfile=myfile+chunk
             percent = (bytes_loaded*100)/(chk.size)
@@ -621,17 +782,22 @@ class ServerBrowser(App):
             return 'canceled'
       except:
          return False
-      self.ls_terminate=True
       return myfile
 
    #-----------------------------------------------
    #threaded_urlopen
    #-----------------------------------------------
-   def threaded_urlopen(self, chk, url):
+   def threaded_urlopen(self, chk, url, post):
       try:
-         chk.response = urlopen(url)
-         chk.size = chk.response.info().getheader('Content-Length').strip()
-         chk.size = int(chk.size)
+         if post:
+            chk.response = urlopen(url, urlencode(post.items()))
+         else:
+            chk.response = urlopen(url)
+         try:
+            chk.size = chk.response.info().getheader('Content-Length').strip()
+            chk.size = int(chk.size)
+         except AttributeError:
+            chk.size=9999999
       except:
          chk.size = False
 
@@ -641,15 +807,18 @@ class ServerBrowser(App):
    def update_height(self, a=None, b=None): #Update some widgets on screen resize.
       try:
          if self.ne:
-            self.ne.size=(Window.size[0], Window.size[1]+0.5)
+            self.ne.size=(Window.size[0], Window.size[1]+1)
             self.ne.text_size=self.ne.size
          self.screen_height=Window.size[0]
          if self.serverinfo:
-            self.spacer.height=((Window.size[1]*0.5)-50*self.serverinfo['clients']+0.5)
+            self.spacer.height=((Window.size[1]*0.5)-50*self.serverinfo['clients']+1)
          self.player_description.size=(Window.size[0], Window.size[1])
          self.player_description.text_size=(Window.size[0]*0.8, Window.size[1]*0.8)
       except:
          pass
+
+   def popup_open(self, obj):
+      self.popup_label.text_size=self.popup_label.size
 
    #-----------------------------------------------
    # on_ne
@@ -670,7 +839,7 @@ class ServerBrowser(App):
    # threaded_webload
    #-----------------------------------------------
    def threaded_webload(self): #this function is called from a thread to handle network problems. It's self-explainable.
-      self.res = urlopen('http://dplogin.com/serverlist.php')
+      self.res = urlopen('http://70.85.9.178/serverlist.php')
       self.total_size = self.res.info().getheader('Content-Length').strip()
       self.total_size = int(self.total_size)
 
@@ -696,30 +865,11 @@ class ServerBrowser(App):
                                     spacing=1,
                                     size_hint_y=None)
       addresses = []
-      self.res = None #Set the response of a HTTP request to None.
-      Thread(target=self.threaded_webload).start() #Thread loading serverlist.php
-      t1 = time()
-      while (not self.res) and time()-t1<2: #Wait for the HTTP response.
-         pass
-      if not self.res: #If there's no response after more than 2 seconds
-         self.on_ne(first) #Enable the NetworkError label
-         self.ls_terminate = True  #Mark the loading process as canceled
-      serverlist = ""
-      bytes_loaded = 0
-      try:
-         while not self.ls_terminate: #no loading when self.total_size is not known.
-            chunk = self.res.read(10)
-            if not chunk: break #break the loop when the file has been just loaded.
-            serverlist = serverlist+chunk
-            percent = (bytes_loaded*100)/(self.total_size)
-            self.progress_bar.value=percent
-            self.hostname.text = "[%s%%]"%percent
-            bytes_loaded += len(chunk)
-      except:
-         self.on_ne(first) #Enable the NetworkError label
-         self.ls_terminate=True #Mark the loading process as canceled
-      if self.ls_terminate or serverlist.find('LatestClientBuild')==-1: #kill the function if it has been canceled by clicking the 'back' button / connection error.
-         if first and not self.nerun: #Call the on_ne event on first run - no servers have been loaded yet OFC.
+      if first:
+         sleep(0.6)
+      serverlist=self.load_webpage('http://70.85.9.178/serverlist.php', 'Downloading serverlist.php...')
+      if self.ls_terminate or not serverlist or serverlist.find('LatestClientBuild')==-1: #kill the function if it has been canceled by clicking the 'back' button / connection error.
+         if not self.nerun: #Call the on_ne event on first run - no servers have been loaded yet OFC.
             self.on_ne(first)
          self.sm.current = 'server_list'
          self.enable_overscroll = False
@@ -819,6 +969,13 @@ class ServerBrowser(App):
       parent.add_widget(child)
 
    #-----------------------------------------------
+   # delwidget
+   #-----------------------------------------------
+   @mainthread
+   def delwidget(self, parent, child): #Adds a widget in the main thread
+      parent.remove_widget(child)
+
+   #-----------------------------------------------
    # clearwidgets
    #-----------------------------------------------
    @mainthread
@@ -829,7 +986,6 @@ class ServerBrowser(App):
    # thread_overscroll
    #-----------------------------------------------
    def thread_overscroll(self, obj, pos): #thread the overscroll event
-      print 'overscroll: %s' %pos
       if not self.enable_overscroll and pos<-self.screen_height/4: #run if overscroll has not been disabled and it's long enough.
          self.loading_label.text = "Downloading serverlist.php..."
          self.progress_bar.value = 0
@@ -845,18 +1001,18 @@ class ServerBrowser(App):
    # on_playerlist_overscroll
    #-----------------------------------------------
    def on_playerlist_overscroll(self, obj, pos): #called when the playerlist has been overscrolled. Not used yet
-      if not self.enable_overscroll and pos<-150:
-         self.loading_label.text = "Downloading serverlist.php..."
-         self.progress_bar.value = 0
-         self.hostname.text = "[0%]"
-         self.sm.current = 'loading_screen'
-         self.enable_overscroll = True   
-         self.load_serverlist(False)
+      if not self.enable_playerlist_overscroll and pos<-75:
+         self.enable_playerlist_overscroll = True
+         self.playerlist_layout.clear_widgets()
+         self.main_layout.clear_widgets()
+         self.thread_update_server(self.c_server) 
+         #self.load_serverlist(False)
          return
-      if self.enable_overscroll == True and pos == 0:
-         self.enable_overscroll = False
+      if self.enable_playerlist_overscroll == True and pos == 0:
+         self.enable_playerlist_overscroll = False
+      return
 
-   def add_row(self, cvar, cvar_value): #Add a row to the cvars list
+   def add_row(self, cvar, cvar_value, in_thread=True): #Add a row to the cvars list
       cvar_label = CvarLabel(text=("[color=#000000][b]%s[/b][/color]" % cvar),
                         markup=True,
                         size_hint_x=.3) #header label
@@ -865,8 +1021,12 @@ class ServerBrowser(App):
                      height=34,
                      text=("[color=#000000]%s[/color]" % cvar_value),
                      markup=True)
-      self.addwidget(self.main_layout, cvar_label)
-      self.addwidget(self.main_layout, var_label)
+      if in_thread:
+         self.addwidget(self.main_layout, cvar_label)
+         self.addwidget(self.main_layout, var_label)
+      else:
+         self.main_layout.add_widget(cvar_label)
+         self.main_layout.add_widget(var_label)
       self.row_list[cvar] = [cvar_label, var_label]#add to the list of rows
 
 
@@ -903,7 +1063,7 @@ def rcon(hostname, port): #a basic status function
       return response[:-1]
 
 #-----------------------------------------------
-# on_playerlist_overscroll
+# sort_dicts
 #-----------------------------------------------
 def sort_dicts(l, key): #sorts a list of dicts by a key
       pom=[]
@@ -941,44 +1101,36 @@ def CleanSpecialChars(text): #Removes the garbage from player's nick (colors, sy
 #-----------------------------------------------
 def GetPlayerInfo(nameorid):
    server_browser.sm.current='loading_screen'
-   #Check if theres at least one alphanumeric character in the name.
+   #Check if there's at least one alphanumeric character in the name.
    cont=False
    for character in nameorid.lower():
       if character in 'abcdefghijklmnopqrstuvwxyz1234567890':
          cont=True; break
    if not cont:
-      self.sm.current='player_info'
+      server_browser.sm.current='player_info'
       return None
    #--------
    res=None
    nicks = []
-   nameorid=quote(nameorid) #Replace chars like #, <, > with %xx
-   response = server_browser.load_webpage('http://dplogin.com/index.php?action=displaymembers&search={name}'.format(name=nameorid), 'Searching for %s' % nameorid)
+   post={'username': nameorid, 'pwhash': '', 'action': 'weblogin1'}
+   response = server_browser.load_webpage('http://70.85.9.178/index.php', 'Getting the ID of %s' % nameorid, post=post)
    if not response:
       server_browser.sm.current='player_info'
       return False
    if response=='canceled':
       server_browser.sm.current='server_info'
       return 'canceled'
-   matches = re.findall('\\<a\\ href\\=\\"\\/index\\.php\\?action\\=viewmember\\&playerid\\=(\d+)\\"\\>.*?\\<\\/a\\>', response)
-   full_list = []
-   response_list = []
+   matches = re.findall("<br>User ID: (\d+)<br>", response)
    for i in matches:
-      response = server_browser.load_webpage('http://dplogin.com/index.php?action=viewmember&playerid={id}'.format(id=i), 'Downloading the profile of %s' % i)
+      response = server_browser.load_webpage('http://70.85.9.178/index.php?action=viewmember&playerid={id}'.format(id=i), 'Downloading the profile of %s' % i)
       if response=='canceled':
          server_browser.sm.current='server_info'
          return 'canceled'
-      response_list.append(response)
+      if not response:
+         return False
       names = re.findall('\\<tr\\>\\<td\\>\\<b\\ class\\=\\"faqtitle\\"\\>Names?\\ registered\\:\\<\\/b\\>\\<\\/td\\>\\<td\\>(.*?)\\<\\/td\\>\\<\\/tr\\>', response)[0].split(', ')
-      full_list.append([str(i), names])
-      if nameorid.lower() in names:
-         dp_id=str(i)
-         res=response
-      else:
-         if matches.index(i) == len(matches)-1:
-            names = full_list[0][1]
-            dp_id = full_list[0][0]
-            res = response_list[0]
+      dp_id=str(i)
+      res=response
    if not res:
       server_browser.sm.current='player_info'
       return None
@@ -1020,4 +1172,4 @@ def Status(host): #a simple status function
 if __name__ == '__main__':
    server_browser=ServerBrowser()
    server_browser.run()
-   
+    
